@@ -474,10 +474,10 @@ var httpc2parameters = []c2structs.C2Parameter{
 	{
 		Name:          "callback_host",
 		Description:   "Callback Host",
-		DefaultValue:  "https://domain.com",
+		DefaultValue:  "https://domainnnnnn.com",
 		ParameterType: c2structs.C2_PARAMETER_TYPE_STRING,
 		Required:      true,
-		VerifierRegex: "^(http|https):\\/\\/[^\\/:]*$",
+		VerifierRegex: "^(http|https):\/\/[^\/:]+(:\d+)?\/?$s",
 	},
 	{
 		Name:          "get_uri",
