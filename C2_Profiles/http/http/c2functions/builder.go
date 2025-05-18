@@ -467,17 +467,17 @@ var httpc2parameters = []c2structs.C2Parameter{
 		IsCryptoType:  true,
 		Choices: []string{
 			"aes256_hmac",
-			"chacha20",
 			"none",
+			"chacha20",
 		},
 	},
 	{
 		Name:          "callback_host",
 		Description:   "Callback Host",
-		DefaultValue:  "https://domainnnnnn.com",
+		DefaultValue:  "https://domain.com",
 		ParameterType: c2structs.C2_PARAMETER_TYPE_STRING,
 		Required:      true,
-		VerifierRegex: "^(http|https):\/\/[^\/:]+(:\d+)?\/?$s",
+		VerifierRegex: "^(http|https):\\/\\/[^\\/:]*$",
 	},
 	{
 		Name:          "get_uri",
