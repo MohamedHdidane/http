@@ -20,6 +20,9 @@ import (
 	mythicConfig "github.com/MythicMeta/MythicContainer/config"
 	"github.com/MythicMeta/MythicContainer/logging"
 	"github.com/gin-gonic/gin"
+	"encoding/base64"
+    "github.com/MythicMeta/MythicContainer/c2_structs"
+    "io/ioutil"
 )
 
 func Initialize(configInstance instanceConfig) *gin.Engine {
@@ -129,88 +132,131 @@ func InitializeGinLogger(configInstance instanceConfig) gin.HandlerFunc {
 }
 
 func setRoutes(r *gin.Engine, configInstance instanceConfig) {
-	// define generic get/post routes
-	director := func(req *http.Request) {
-		req.Header.Add("mythic", "http")
-		req.Header.Add("X-forwarded-user-agent", req.Header.Get("User-Agent"))
-		req.Header.Add("x-forwarded-url", req.URL.RequestURI())
-		req.Header.Add("x-forwarded-for", req.RemoteAddr)
-		req.Header.Add("x-forwarded-host", req.Host)
-		req.URL.Scheme = "http"
-		req.URL.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
-		req.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
-		req.URL.Path = "/agent_message"
-	}
-	modifyResponse := func(resp *http.Response) error {
-		//logging.LogInfo("hitting modify response", "responseCode", resp.StatusCode)
-		if resp.StatusCode != http.StatusOK {
-			if configInstance.ErrorFilePath != "" {
-				statusCode := 200
-				if configInstance.ErrorStatusCode > 0 {
-					statusCode = configInstance.ErrorStatusCode
-				}
-				file, err := os.Open(configInstance.ErrorFilePath)
-				if err != nil {
-					logging.LogError(err, "failed to get error_file_path")
-					return err
-				}
-				fileStat, err := file.Stat()
-				if err != nil {
-					logging.LogError(err, "failed to stat error_file_path")
-					return err
-				}
-				resp.Body = io.NopCloser(file)
-				resp.Header["Content-Length"] = []string{fmt.Sprint(fileStat.Size())}
-				resp.StatusCode = statusCode
-				return nil
-			}
-		}
-		return nil
-	}
-	proxy := &httputil.ReverseProxy{
-		Director:       director,
-		ModifyResponse: modifyResponse,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:    10,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-	// each route is "/someWord" with an optional "/somethingElse" afterwards
-	r.GET("/:val/*action", getRequest(configInstance, proxy))
-	r.POST("/:val/*action", postRequest(configInstance, proxy))
-	r.GET("/:val", getRequest(configInstance, proxy))
-	r.POST("/:val", postRequest(configInstance, proxy))
-	r.GET("/", getRequest(configInstance, proxy))
-	r.POST("/", postRequest(configInstance, proxy))
-	if len(configInstance.PayloadHostPaths) > 0 {
-		for path, value := range configInstance.PayloadHostPaths {
-			localVal := value
-			directorForFiles := func(req *http.Request) {
-				req.Header.Add("mythic", "http")
-				req.Header.Add("X-forwarded-user-agent", req.Header.Get("User-Agent"))
-				req.Header.Add("x-forwarded-url", req.URL.RequestURI())
-				req.Header.Add("x-forwarded-for", req.RemoteAddr)
-				req.Header.Add("x-forwarded-host", req.Host)
-				req.URL.Scheme = "http"
-				req.URL.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
-				req.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
-				req.URL.Path = fmt.Sprintf("/direct/download/%s", localVal)
-			}
-			proxyForFiles := httputil.ReverseProxy{
-				Director:       directorForFiles,
-				ModifyResponse: modifyResponse,
-				Transport: &http.Transport{
-					DialContext: (&net.Dialer{
-						Timeout: 30 * time.Second,
-					}).DialContext,
-					MaxIdleConns:    10,
-					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-				}}
-			r.GET(path, generateServeFile(configInstance, fmt.Sprintf("%s", localVal), &proxyForFiles))
-		}
-	}
+    // Fetch C2 profile parameters (assuming Mythic provides a way to access them)
+    // For simplicity, assume AESPSK is passed via environment variable or config
+    encType := os.Getenv("AESPSK") // Replace with actual parameter fetching logic
+    encKey := os.Getenv("ENC_KEY") // Replace with actual key fetching logic
+
+    encHandler, err := NewEncryptionHandler(encKey, encType)
+    if err != nil {
+        logging.LogFatalError(err, "Failed to initialize encryption handler")
+    }
+
+    // Define generic get/post routes
+    director := func(req *http.Request) {
+        req.Header.Add("mythic", "http")
+        req.Header.Add("X-forwarded-user-agent", req.Header.Get("User-Agent"))
+        req.Header.Add("x-forwarded-url", req.URL.RequestURI())
+        req.Header.Add("x-forwarded-for", req.RemoteAddr)
+        req.Header.Add("x-forwarded-host", req.Host)
+        req.URL.Scheme = "http"
+        req.URL.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
+        req.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
+        req.URL.Path = "/agent_message"
+
+        // Decrypt incoming request body for POST requests
+        if req.Method == "POST" {
+            body, err := ioutil.ReadAll(req.Body)
+            if err != nil {
+                logging.LogError(err, "Failed to read request body")
+                return
+            }
+            decrypted, err := encHandler.Decrypt(body)
+            if err != nil {
+                logging.LogError(err, "Failed to decrypt request body")
+                return
+            }
+            req.Body = ioutil.NopCloser(bytes.NewReader(decrypted))
+        }
+    }
+
+    modifyResponse := func(resp *http.Response) error {
+        if resp.StatusCode != http.StatusOK {
+            if configInstance.ErrorFilePath != "" {
+                statusCode := 200
+                if configInstance.ErrorStatusCode > 0 {
+                    statusCode = configInstance.ErrorStatusCode
+                }
+                file, err := os.Open(configInstance.ErrorFilePath)
+                if err != nil {
+                    logging.LogError(err, "failed to get error_file_path")
+                    return err
+                }
+                fileStat, err := file.Stat()
+                if err != nil {
+                    logging.LogError(err, "failed to stat error_file_path")
+                    return err
+                }
+                resp.Body = io.NopCloser(file)
+                resp.Header["Content-Length"] = []string{fmt.Sprint(fileStat.Size())}
+                resp.StatusCode = statusCode
+                return nil
+            }
+        } else {
+            // Encrypt response body
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                logging.LogError(err, "Failed to read response body")
+                return err
+            }
+            encrypted, err := encHandler.Encrypt(body)
+            if err != nil {
+                logging.LogError(err, "Failed to encrypt response body")
+                return err
+            }
+            resp.Body = ioutil.NopCloser(bytes.NewReader(encrypted))
+            resp.Header["Content-Length"] = []string{fmt.Sprint(len(encrypted))}
+        }
+        return nil
+    }
+
+    proxy := &httputil.ReverseProxy{
+        Director:       director,
+        ModifyResponse: modifyResponse,
+        Transport: &http.Transport{
+            DialContext: (&net.Dialer{
+                Timeout: 30 * time.Second,
+            }).DialContext,
+            MaxIdleConns:    10,
+            TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+        },
+    }
+
+    // Route definitions remain the same
+    r.GET("/:val/*action", getRequest(configInstance, proxy))
+    r.POST("/:val/*action", postRequest(configInstance, proxy))
+    r.GET("/:val", getRequest(configInstance, proxy))
+    r.POST("/:val", postRequest(configInstance, proxy))
+    r.GET("/", getRequest(configInstance, proxy))
+    r.POST("/", postRequest(configInstance, proxy))
+    if len(configInstance.PayloadHostPaths) > 0 {
+        for path, value := range configInstance.PayloadHostPaths {
+            localVal := value
+            directorForFiles := func(req *http.Request) {
+                req.Header.Add("mythic", "http")
+                req.Header.Add("X-forwarded-user-agent", req.Header.Get("User-Agent"))
+                req.Header.Add("x-forwarded-url", req.URL.RequestURI())
+                req.Header.Add("x-forwarded-for", req.RemoteAddr)
+                req.Header.Add("x-forwarded-host", req.Host)
+                req.URL.Scheme = "http"
+                req.URL.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
+                req.Host = fmt.Sprintf("%s:%d", mythicConfig.MythicConfig.MythicServerHost, mythicConfig.MythicConfig.MythicServerPort)
+                req.URL.Path = fmt.Sprintf("/direct/download/%s", localVal)
+            }
+            proxyForFiles := httputil.ReverseProxy{
+                Director:       directorForFiles,
+                ModifyResponse: modifyResponse,
+                Transport: &http.Transport{
+                    DialContext: (&net.Dialer{
+                        Timeout: 30 * time.Second,
+                    }).DialContext,
+                    MaxIdleConns:    10,
+                    TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+                },
+            }
+            r.GET(path, generateServeFile(configInstance, fmt.Sprintf("%s", localVal), &proxyForFiles))
+        }
+    }
 }
 
 func generateServeFile(configInstance instanceConfig, fileUUID string, proxyForFiles *httputil.ReverseProxy) gin.HandlerFunc {
